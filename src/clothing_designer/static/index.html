@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clothing Designer</title>
+<style>
+  :root {
+    --bg: #f6f4f0; --panel: #ffffff; --ink: #1d1b18; --muted: #6f6a62;
+    --line: #e2ddd4; --accent: #2f4b3c; --accent-ink: #ffffff; --error: #a3312a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513; --panel: #201e1b; --ink: #ece8e1; --muted: #9c968c;
+      --line: #35322d; --accent: #8fbf9f; --accent-ink: #10201a; --error: #ef8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 24px;
+         max-width: 1280px; margin: 0 auto; padding: 24px; align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  h2 { font-size: 22px; margin: 0 0 4px; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 18px 0 6px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  label { display: block; font-weight: 600; font-size: 13px; margin: 14px 0 4px; }
+  textarea, select, input[type=file] {
+    width: 100%; font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  textarea { resize: vertical; min-height: 96px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 10px 14px;
+           background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-top: 14px; }
+  button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  #status { margin-top: 14px; font-size: 13px; min-height: 20px; }
+  #status.error { color: var(--error); }
+  .stage { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 4fr); gap: 24px; }
+  @media (max-width: 1100px) { .stage { grid-template-columns: 1fr; } }
+  .canvas { aspect-ratio: 3 / 4; background: var(--bg); border: 1px dashed var(--line);
+            border-radius: 10px; display: grid; place-items: center; overflow: hidden;
+            text-align: center; color: var(--muted); padding: 0; }
+  .canvas img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .canvas p { padding: 24px; margin: 0; }
+  .versions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .versions button { margin: 0; padding: 4px 10px; font-size: 13px; }
+  .versions button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+  .swatch { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .swatch i { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); display: inline-block; }
+  ul { margin: 0; padding-left: 18px; }
+  details { margin-top: 18px; font-size: 13px; }
+  details p { color: var(--muted); white-space: pre-wrap; }
+  .note { border-left: 3px solid var(--accent); padding-left: 10px; margin: 12px 0 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>Clothing Designer</h1>
+    <div class="muted" id="models">Claude designs it. A model on this Mac draws it.</div>
+
+    <form id="brief-form">
+      <label for="brief">What should we design?</label>
+      <textarea id="brief" required placeholder="A waterproof trail-running jacket with 90s colour blocking and a packable hood"></textarea>
+
+      <label for="presentation">How should it be shown?</label>
+      <select id="presentation">
+        <option>Studio product photo on an invisible mannequin, plain light backdrop</option>
+        <option id="keep-look">Keep the look of my reference image</option>
+        <option>Flat lay photographed from directly above on a neutral surface</option>
+        <option>Worn by a model, full-length editorial photo, soft daylight</option>
+        <option>Fashion illustration, marker and ink on paper</option>
+        <option>Technical flat sketch, black line drawing, front view</option>
+      </select>
+
+      <label for="reference">Reference image (optional)</label>
+      <input id="reference" type="file" accept="image/*">
+      <div class="muted">A sketch, a photo to restyle, or a mood image.</div>
+
+      <button id="create" type="submit">Design it</button>
+    </form>
+
+    <form id="revise-form" hidden>
+      <label for="feedback">What would you change?</label>
+      <textarea id="feedback" required placeholder="Make the collar taller and switch the lining to burnt orange"></textarea>
+      <div class="row">
+        <button id="revise" type="submit">Revise</button>
+        <button id="rerender" type="button" class="secondary">Draw again</button>
+        <button id="reset" type="button" class="secondary">New design</button>
+      </div>
+    </form>
+
+    <div id="status" role="status"></div>
+  </section>
+
+  <section class="panel stage">
+    <div>
+      <div class="canvas" id="canvas"><p>Your design will appear here.</p></div>
+      <div class="versions" id="versions"></div>
+    </div>
+    <div id="spec" hidden>
+      <h2 id="spec-name"></h2>
+      <div class="muted" id="spec-type"></div>
+      <p id="spec-summary"></p>
+      <p class="note muted" id="spec-note"></p>
+      <h3>Palette</h3><div class="swatches" id="spec-palette"></div>
+      <h3>Silhouette</h3><div id="spec-silhouette"></div>
+      <h3>Fabrics</h3><ul id="spec-fabrics"></ul>
+      <h3>Details</h3><ul id="spec-details"></ul>
+      <details>
+        <summary>Prompt sent to the image model (<span id="spec-mode"></span>)</summary>
+        <p id="spec-prompt"></p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let design = null;
+let shown = 0;      // index of the version on screen
+let busy = false;
+
+function setStatus(text, isError = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", isError);
+}
+
+function setBusy(value) {
+  busy = value;
+  for (const id of ["create", "revise", "rerender", "reset"]) $(id).disabled = value;
+}
+
+async function call(path, body) {
+  const response = await fetch(path, { method: "POST", body });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+  return data;
+}
+
+function fillList(id, items) {
+  const list = $(id);
+  list.replaceChildren(...items.map((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  }));
+}
+
+function show() {
+  const version = design.versions[shown];
+  const spec = version.spec;
+
+  const canvas = $("canvas");
+  if (version.image) {
+    const image = document.createElement("img");
+    image.src = `/files/${design.id}/${version.image}`;
+    image.alt = `Render of ${spec.name}`;
+    canvas.replaceChildren(image);
+  } else {
+    const text = document.createElement("p");
+    text.textContent = busy ? "Drawing on this Mac…" : "Not drawn yet.";
+    canvas.replaceChildren(text);
+  }
+
+  $("versions").replaceChildren(...design.versions.map((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = `v${item.n}`;
+    button.title = item.feedback || "First design";
+    button.setAttribute("aria-pressed", index === shown);
+    button.onclick = () => { shown = index; show(); };
+    return button;
+  }));
+
+  $("spec").hidden = false;
+  $("spec-name").textContent = spec.name;
+  $("spec-type").textContent = spec.garment_type;
+  $("spec-summary").textContent = spec.summary;
+  $("spec-note").textContent = version.note;
+  $("spec-silhouette").textContent = spec.silhouette;
+  fillList("spec-fabrics", spec.fabrics);
+  fillList("spec-details", spec.details);
+  $("spec-palette").replaceChildren(...spec.palette.map((swatch) => {
+    const wrap = document.createElement("span");
+    wrap.className = "swatch";
+    const dot = document.createElement("i");
+    if (/^#[0-9a-f]{3,8}$/i.test(swatch.hex)) dot.style.background = swatch.hex;
+    wrap.append(dot, `${swatch.name} ${swatch.hex}`);
+    return wrap;
+  }));
+  $("spec-mode").textContent = version.render_mode !== "edit" ? "new image from text only"
+    : version.edit_source === "reference" ? "editing your reference image" : "editing the previous render";
+  $("spec-prompt").textContent = version.render_prompt;
+}
+
+function adopt(next) {
+  design = next;
+  shown = design.versions.length - 1;
+  show();
+}
+
+async function renderLatest() {
+  setStatus("Drawing on this Mac. The first run also loads the model, so it takes longer.");
+  show();
+  adopt(await call(`/api/designs/${design.id}/render`));
+  setStatus("");
+}
+
+async function run(step) {
+  if (busy) return;
+  setBusy(true);
+  try {
+    await step();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    setBusy(false);
+    if (design) show();
+  }
+}
+
+$("brief-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  run(async () => {
+    const body = new FormData();
+    body.append("brief", $("brief").value);
+    body.append("presentation", $("presentation").value);
+    if ($("reference").files[0]) body.append("reference", $("reference").files[0]);
+    setStatus("Claude is designing…");
+    adopt(await call("/api/designs", body));
+    $("brief-form").hidden = true;
+    $("revise-form").hidden = false;
+    await renderLatest();
+  });
+});
+
+$("revise-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  run(async () => {
+    const body = new FormData();
+    body.append("feedback", $("feedback").value);
+    setStatus("Claude is revising…");
+    adopt(await call(`/api/designs/${design.id}/revise`, body));
+    $("feedback").value = "";
+    await renderLatest();
+  });
+});
+
+// With a reference image, default to keeping its look instead of restaging it.
+$("reference").addEventListener("change", () => {
+  if ($("reference").files[0]) $("keep-look").selected = true;
+});
+
+$("rerender").addEventListener("click", () => run(renderLatest));
+
+$("reset").addEventListener("click", () => {
+  design = null;
+  $("brief-form").hidden = false;
+  $("revise-form").hidden = true;
+  $("spec").hidden = true;
+  $("versions").replaceChildren();
+  const text = document.createElement("p");
+  text.textContent = "Your design will appear here.";
+  $("canvas").replaceChildren(text);
+  setStatus("");
+});
+
+fetch("/api/health").then((r) => r.json()).then((info) => {
+  const hosted = info.edit_model.startsWith("fal-ai/");
+  const edits = !info.edit_model ? " and edits" : hosted ? "" : `, ${info.edit_model} edits`;
+  const local = info.renderer === "mock" ? "Placeholder renderer (no model)" : `On this Mac: ${info.image_model} draws${edits}`;
+  const remote = hosted && info.renderer !== "mock" ? ` Photo edits are sent to fal.ai (${info.edit_model.slice(7)}).` : "";
+  $("models").textContent = `${info.claude_model} designs. ${local}.${remote}`;
+}).catch(() => {});
+</script>
+</body>
+</html>
