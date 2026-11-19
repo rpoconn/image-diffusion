@@ -29,17 +29,20 @@ def make_turn(name: str, mode: str, source: str = "current") -> DesignTurn:
     )
 
 
+LLM_COST = {"model": "claude-haiku-5-5", "input_tokens": 2000, "output_tokens": 1000, "usd": 0.0007}
+
+
 @pytest.fixture
 def client(monkeypatch):
     calls = {}
 
     def fake_start(brief, presentation, reference=None):
         calls["start"] = {"brief": brief, "reference": reference}
-        return make_turn("Trail Shell", "edit" if reference else "generate", "reference")
+        return make_turn("Trail Shell", "edit" if reference else "generate", "reference"), LLM_COST
 
     def fake_revise(brief, presentation, spec, feedback, render=None, reference=None):
         calls["revise"] = {"spec": spec, "feedback": feedback, "render": render, "reference": reference}
-        return make_turn("Trail Shell II", "edit", calls.get("revise_source", "current"))
+        return make_turn("Trail Shell II", "edit", calls.get("revise_source", "current")), LLM_COST
 
     monkeypatch.setattr(server, "start_design", fake_start)
     monkeypatch.setattr(server, "revise_design", fake_revise)
@@ -160,3 +163,78 @@ def test_hosted_edit_calls_fal_with_the_image_and_saves_the_result(monkeypatch, 
     assert sent["image_size"] == {"width": 800, "height": 992}
     assert sent["image_urls"][0].startswith("data:image/png;base64,")
     assert (tmp_path / "out.png").read_bytes() == b"PNGDATA"
+
+
+def test_hosted_generate_calls_fal_without_an_image(monkeypatch, tmp_path):
+    import fal_client
+    import httpx
+
+    from clothing_designer import hosted
+
+    sent = {}
+
+    def fake_subscribe(application, arguments, **kwargs):
+        sent.update(application=application, **arguments)
+        return {"images": [{"url": "https://example.invalid/result.png"}]}
+
+    monkeypatch.setattr(hosted, "settings", type("S", (), {"image_model": "fal-ai/flux-2/klein/4b"})())
+    monkeypatch.setenv("FAL_KEY", "test-key")
+    monkeypatch.setattr(fal_client, "subscribe", fake_subscribe)
+    monkeypatch.setattr(httpx, "get", lambda url, **kwargs: httpx.Response(200, content=b"PNG", request=httpx.Request("GET", url)))
+    hosted.generate("a red coat", tmp_path / "out.png", 3, (768, 1024))
+
+    assert sent["application"] == "fal-ai/flux-2/klein/4b" and "image_urls" not in sent
+    assert sent["image_size"] == {"width": 768, "height": 1024} and sent["seed"] == 3
+    assert (tmp_path / "out.png").read_bytes() == b"PNG"
+
+
+def test_costs_are_recorded_per_claude_call_and_per_render(client, monkeypatch):
+    from clothing_designer import pricing
+
+    design = client.post("/api/designs", data={"brief": "a trail jacket"}).json()
+    assert design["versions"][0]["llm_cost"] == LLM_COST and design["versions"][0]["render_costs"] == []
+
+    # The mock renderer is local, so renders are free; drawing again adds a second entry.
+    client.post(f"/api/designs/{design['id']}/render")
+    design = client.post(f"/api/designs/{design['id']}/render").json()
+    renders = design["versions"][0]["render_costs"]
+    assert [r["usd"] for r in renders] == [0.0, 0.0] and renders[0]["where"] == "local"
+
+    # A hosted model is charged per megapixel of the image it returned.
+    monkeypatch.setattr(pricing, "render_model", lambda is_edit: "fal-ai/flux-2/klein/4b")
+    design = client.post(f"/api/designs/{design['id']}/render").json()
+    hosted_render = design["versions"][0]["render_costs"][-1]
+    assert hosted_render["where"] == "fal.ai"
+    assert hosted_render["usd"] == pytest.approx(768 * 1024 / 1e6 * 0.005)
+
+    assert client.get("/api/health").json()["rates"]["llm"]["usd_per_mtok_output"] == 0.50
+
+
+def test_price_table():
+    from clothing_designer import pricing
+
+    assert pricing.llm_cost("claude-haiku-5-5", 2000, 1000)["usd"] == pytest.approx(0.0007)
+    assert pricing.claude_rates("claude-sonnet-5-5") == (2.00, 10.00)
+    assert pricing.claude_rates("claude-haiku-5-5", input_tokens=150_000) == (0.50, 2.50)
+    assert pricing.llm_cost("some-future-model", 10, 10)["usd"] is None
+    assert pricing.image_cost("flux2-klein-4b", 768, 1024)["usd"] == 0.0
+    assert pricing.image_cost("fal-ai/unlisted", 1000, 1000)["usd"] is None
+    assert pricing.image_cost("fal-ai/qwen-image-edit-2511", 1000, 1000)["usd"] == pytest.approx(0.03)
+
+
+def test_an_existing_image_is_always_edited_never_redrawn(monkeypatch):
+    from clothing_designer import designer
+
+    # Claude asks to redraw from text every time; the app only allows that with no image.
+    monkeypatch.setattr(designer, "_ask", lambda content: (make_turn("Coat", "generate", "reference"), LLM_COST))
+    spec = make_turn("Coat", "generate").spec
+
+    assert designer.start_design("a coat", "studio")[0].render_mode == "generate"
+    turn = designer.start_design("this coat in red", "studio", png_bytes())[0]
+    assert (turn.render_mode, turn.edit_source) == ("edit", "reference")
+
+    turn = designer.revise_design("a coat", "studio", spec, "longer", render=png_bytes())[0]
+    assert (turn.render_mode, turn.edit_source) == ("edit", "current")
+    turn = designer.revise_design("a coat", "studio", spec, "longer", render=png_bytes(), reference=png_bytes())[0]
+    assert (turn.render_mode, turn.edit_source) == ("edit", "reference")  # Claude's pick when both exist
+    assert designer.revise_design("a coat", "studio", spec, "longer")[0].render_mode == "generate"

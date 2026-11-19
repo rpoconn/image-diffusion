@@ -43,6 +43,19 @@ By default FLUX.2 klein both draws and edits. For closer likeness when editing a
 
 Designs from a text-only brief are always drawn locally by FLUX.2 klein.
 
+## Drawing on fal.ai instead of this Mac
+
+Set `IMAGE_MODEL=fal-ai/flux-2/klein/4b` (with `FAL_KEY`) to draw new designs on fal.ai: about
+two seconds a render and half a cent per megapixel, with no model download. That endpoint only
+draws from text, so set `EDIT_MODEL` to a model that edits, such as the hosted Qwen above.
+
+## Cost panel
+
+The panel under the form estimates what the current design has cost so far: Claude tokens plus
+hosted renders, updated after every design, revision and redraw. Models that run on this Mac
+count as free. The rates live in `src/clothing_designer/pricing.py`; they are list prices, so
+update that file when prices change or you add a model, and treat the totals as estimates.
+
 ## Settings
 
 All settings live in `.env`; see `.env.example` for the list. The main ones:

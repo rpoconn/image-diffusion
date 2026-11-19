@@ -1,6 +1,6 @@
-"""Hosted image editing on fal.ai, for edit models too large to run well on this Mac.
+"""Hosted image models on fal.ai: drawing from a prompt, and editing an existing image.
 
-Unlike the local renderer, this sends the image being edited to fal.ai."""
+Unlike the local renderer, this sends the prompt (and any image being edited) to fal.ai."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def is_hosted(model: str) -> bool:
     return model.startswith("fal-ai/")
 
 
-def edit(prompt: str, out_path: Path, seed: int, reference: Path, size: tuple[int, int]) -> None:
+def _run(model: str, arguments: dict, out_path: Path, seed: int, size: tuple[int, int]) -> None:
     if not os.environ.get("FAL_KEY"):
         raise RendererError("No fal.ai key found. Put FAL_KEY in the .env file and restart.")
 
@@ -25,10 +25,9 @@ def edit(prompt: str, out_path: Path, seed: int, reference: Path, size: tuple[in
 
     try:
         result = fal_client.subscribe(
-            settings.edit_model,
+            model,
             arguments={
-                "prompt": prompt,
-                "image_urls": [fal_client.encode_file(reference)],  # sent inline as a data URI
+                **arguments,
                 "image_size": {"width": size[0], "height": size[1]},
                 "seed": seed,
                 "num_images": 1,
@@ -41,7 +40,19 @@ def edit(prompt: str, out_path: Path, seed: int, reference: Path, size: tuple[in
     except fal_client.client.FalClientHTTPError as exc:
         raise RendererError(f"fal.ai rejected the request ({exc.status_code}): {exc.message}") from exc
     except fal_client.client.FalClientTimeoutError as exc:
-        raise RendererError("fal.ai did not finish the edit within 5 minutes.") from exc
+        raise RendererError("fal.ai did not finish the image within 5 minutes.") from exc
     except (fal_client.client.FalClientError, httpx.HTTPError, KeyError, IndexError) as exc:
-        raise RendererError(f"Hosted edit failed: {exc}") from exc
+        raise RendererError(f"Hosted render failed: {exc}") from exc
     out_path.write_bytes(image.content)
+
+
+def generate(prompt: str, out_path: Path, seed: int, size: tuple[int, int]) -> None:
+    _run(settings.image_model, {"prompt": prompt}, out_path, seed, size)
+
+
+def edit(prompt: str, out_path: Path, seed: int, reference: Path, size: tuple[int, int]) -> None:
+    import fal_client
+
+    # The image is sent inline as a data URI.
+    arguments = {"prompt": prompt, "image_urls": [fal_client.encode_file(reference)]}
+    _run(settings.edit_model, arguments, out_path, seed, size)

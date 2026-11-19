@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .config import settings
 from .designer import DesignerError, DesignSpec, DesignTurn, revise_design, start_design
+from . import pricing
 from .errors import RendererError
 from .renderer import make_renderer
 
@@ -51,7 +52,7 @@ def _get(design_id: str) -> dict:
     return designs[design_id]
 
 
-def _add_version(design: dict, turn: DesignTurn, feedback: str | None) -> None:
+def _add_version(design: dict, turn: DesignTurn, llm_cost: dict, feedback: str | None) -> None:
     design["versions"].append(
         {
             "n": len(design["versions"]) + 1,
@@ -63,6 +64,9 @@ def _add_version(design: dict, turn: DesignTurn, feedback: str | None) -> None:
             "note": turn.note,
             "image": None,
             "seed": None,
+            # What this version cost: the Claude call, then one entry per render of it.
+            "llm_cost": llm_cost,
+            "render_costs": [],
         }
     )
 
@@ -104,6 +108,7 @@ def health() -> dict:
         "renderer": settings.renderer,
         "image_model": settings.image_model,
         "edit_model": settings.edit_model,
+        "rates": pricing.rates(),
     }
 
 
@@ -128,7 +133,7 @@ def create_design(
         reference_bytes = buffer.getvalue()
 
     try:
-        turn = start_design(brief, presentation, reference_bytes)
+        turn, llm_cost = start_design(brief, presentation, reference_bytes)
     except DesignerError as exc:
         raise HTTPException(502, str(exc))
 
@@ -144,7 +149,7 @@ def create_design(
     if reference_bytes:
         (_dir(design_id) / "reference.png").write_bytes(reference_bytes)
         design["reference"] = "reference.png"
-    _add_version(design, turn, feedback=None)
+    _add_version(design, turn, llm_cost, feedback=None)
     designs[design_id] = design
     _save(design)
     return design
@@ -165,7 +170,7 @@ def revise(design_id: str, feedback: str = Form(...)) -> dict:
         reference_bytes = (_dir(design_id) / design["reference"]).read_bytes()
 
     try:
-        turn = revise_design(
+        turn, llm_cost = revise_design(
             brief=design["brief"],
             presentation=design["presentation"],
             spec=DesignSpec.model_validate(current["spec"]),
@@ -176,14 +181,14 @@ def revise(design_id: str, feedback: str = Form(...)) -> dict:
     except DesignerError as exc:
         raise HTTPException(502, str(exc))
 
-    _add_version(design, turn, feedback=feedback)
+    _add_version(design, turn, llm_cost, feedback=feedback)
     _save(design)
     return design
 
 
 @app.post("/api/designs/{design_id}/render")
 def render(design_id: str) -> dict:
-    """Render the newest version with the local image model. Slow: seconds to minutes."""
+    """Render the newest version with the image model. Slow when local: seconds to minutes."""
     design = _get(design_id)
     version = design["versions"][-1]
 
@@ -201,6 +206,9 @@ def render(design_id: str) -> dict:
     except RendererError as exc:
         raise HTTPException(500, str(exc))
 
+    with Image.open(_dir(design_id) / filename) as image:
+        cost = pricing.image_cost(pricing.render_model(is_edit=reference is not None), *image.size)
+    version.setdefault("render_costs", []).append(cost)  # designs saved before costs existed
     version["image"] = filename
     version["seed"] = seed
     _save(design)

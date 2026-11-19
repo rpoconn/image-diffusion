@@ -56,6 +56,13 @@
   details { margin-top: 18px; font-size: 13px; }
   details p { color: var(--muted); white-space: pre-wrap; }
   .note { border-left: 3px solid var(--accent); padding-left: 10px; margin: 12px 0 0; }
+  .cost { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13px; }
+  .cost h3 { margin-top: 0; }
+  .cost table { width: 100%; border-collapse: collapse; }
+  .cost td { padding: 3px 0; vertical-align: top; }
+  .cost td:last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 12px; }
+  .cost tr.total td { border-top: 1px solid var(--line); font-weight: 600; padding-top: 6px; }
+  .cost .muted { font-size: 12px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -97,6 +104,16 @@
     </form>
 
     <div id="status" role="status"></div>
+
+    <div class="cost" id="cost" hidden>
+      <h3>Estimated cost of this design</h3>
+      <table>
+        <tr><td>Claude<div class="muted" id="cost-llm-note"></div></td><td id="cost-llm"></td></tr>
+        <tr><td>Images<div class="muted" id="cost-image-note"></div></td><td id="cost-image"></td></tr>
+        <tr class="total"><td>Total</td><td id="cost-total"></td></tr>
+      </table>
+      <div class="muted" id="cost-last"></div>
+    </div>
   </section>
 
   <section class="panel stage">
@@ -126,6 +143,7 @@ const $ = (id) => document.getElementById(id);
 let design = null;
 let shown = 0;      // index of the version on screen
 let busy = false;
+let info = null;    // /api/health: the models in use and their rates
 
 function setStatus(text, isError = false) {
   $("status").textContent = text;
@@ -153,7 +171,66 @@ function fillList(id, items) {
   }));
 }
 
+const money = (usd) => usd === 0 ? "$0.00" : usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+const shortName = (model) => model.replace(/^fal-ai\//, "");
+
+// One line per image model in use: where it runs and what it charges.
+function imageRate(rate, role) {
+  if (rate.model === "mock") return "Placeholder renderer, free";
+  const price = rate.where === "local" ? "on this Mac, free"
+    : rate.usd_per_megapixel === null ? "fal.ai, price unknown" : `fal.ai, $${rate.usd_per_megapixel}/megapixel`;
+  return `${role}: ${shortName(rate.model)} (${price})`;
+}
+
+// Totals for the whole design, recomputed from every Claude call and render so far.
+function showCost() {
+  if (!info) return;
+  const llm = info.rates.llm;
+  $("cost-llm-note").textContent = llm.usd_per_mtok_input === null ? `${llm.model} (price unknown)`
+    : `${llm.model}, $${llm.usd_per_mtok_input} in / $${llm.usd_per_mtok_output} out per million tokens`;
+  const { generate, edit } = info.rates;
+  const lines = generate.model === edit.model
+    ? [imageRate(generate, "Draws and edits")]
+    : [imageRate(generate, "Draws"), imageRate(edit, "Edits")];
+  $("cost-image-note").replaceChildren(...lines.map((text) => {
+    const line = document.createElement("div");
+    line.textContent = text;
+    return line;
+  }));
+
+  const steps = [];       // every charge in order, to report the latest one
+  let llmUsd = 0, imageUsd = 0, tokens = 0, renders = 0, unknown = false;
+  for (const version of design ? design.versions : []) {
+    if (version.llm_cost) {
+      steps.push(["Claude", version.llm_cost.usd]);
+      tokens += version.llm_cost.input_tokens + version.llm_cost.output_tokens;
+      if (version.llm_cost.usd === null) unknown = true; else llmUsd += version.llm_cost.usd;
+    }
+    for (const render of version.render_costs || []) {
+      steps.push([render.where === "local" ? "render on this Mac" : "render on fal.ai", render.usd]);
+      renders += 1;
+      if (render.usd === null) unknown = true; else imageUsd += render.usd;
+    }
+  }
+  $("cost-llm").textContent = money(llmUsd);
+  $("cost-llm").title = `${tokens.toLocaleString()} tokens`;
+  $("cost-image").textContent = money(imageUsd);
+  $("cost-image").title = `${renders} render${renders === 1 ? "" : "s"}`;
+  $("cost-total").textContent = money(llmUsd + imageUsd) + (unknown ? "+" : "");
+  const last = steps[steps.length - 1];
+  $("cost-last").textContent = (last ? `Last step: ${last[0]}, ${last[1] === null ? "price unknown" : money(last[1])}. ` : "")
+    + (unknown ? "Steps with no known price are left out. " : "") + "From list prices, not a bill.";
+  $("cost").hidden = false;
+}
+
+// "Drawing on fal.ai" or "Drawing on this Mac", for the model this version will use.
+function drawing(version) {
+  const rate = info && info.rates[version.render_mode === "edit" ? "edit" : "generate"];
+  return rate && rate.where === "fal.ai" ? "Drawing on fal.ai" : "Drawing on this Mac";
+}
+
 function show() {
+  showCost();
   const version = design.versions[shown];
   const spec = version.spec;
 
@@ -165,7 +242,7 @@ function show() {
     canvas.replaceChildren(image);
   } else {
     const text = document.createElement("p");
-    text.textContent = busy ? "Drawing on this Mac…" : "Not drawn yet.";
+    text.textContent = busy ? `${drawing(version)}…` : "Not drawn yet.";
     canvas.replaceChildren(text);
   }
 
@@ -208,7 +285,8 @@ function adopt(next) {
 }
 
 async function renderLatest() {
-  setStatus("Drawing on this Mac. The first run also loads the model, so it takes longer.");
+  const where = drawing(design.versions[design.versions.length - 1]);
+  setStatus(where.endsWith("Mac") ? `${where}. The first run also loads the model, so it takes longer.` : `${where}…`);
   show();
   adopt(await call(`/api/designs/${design.id}/render`));
   setStatus("");
@@ -271,14 +349,20 @@ $("reset").addEventListener("click", () => {
   text.textContent = "Your design will appear here.";
   $("canvas").replaceChildren(text);
   setStatus("");
+  showCost();
 });
 
-fetch("/api/health").then((r) => r.json()).then((info) => {
-  const hosted = info.edit_model.startsWith("fal-ai/");
-  const edits = !info.edit_model ? " and edits" : hosted ? "" : `, ${info.edit_model} edits`;
-  const local = info.renderer === "mock" ? "Placeholder renderer (no model)" : `On this Mac: ${info.image_model} draws${edits}`;
-  const remote = hosted && info.renderer !== "mock" ? ` Photo edits are sent to fal.ai (${info.edit_model.slice(7)}).` : "";
-  $("models").textContent = `${info.claude_model} designs. ${local}.${remote}`;
+fetch("/api/health").then((r) => r.json()).then((health) => {
+  info = health;
+  const { generate, edit } = info.rates;
+  const place = (rate) => rate.where === "fal.ai" ? "fal.ai" : "this Mac";
+  const images = info.renderer === "mock" ? "Placeholder renderer (no model)."
+    : generate.model === edit.model ? `${shortName(generate.model)} draws and edits on ${place(generate)}.`
+    : `${shortName(generate.model)} draws on ${place(generate)}; ${shortName(edit.model)} edits on ${place(edit)}.`;
+  const sent = info.renderer !== "mock" && [generate, edit].some((rate) => rate.where === "fal.ai")
+    ? " Prompts and images for those steps are sent to fal.ai." : "";
+  $("models").textContent = `${info.claude_model} designs. ${images}${sent}`;
+  showCost();
 }).catch(() => {});
 </script>
 </body>

@@ -25,7 +25,8 @@ class MfluxRenderer:
     """Runs the local models through mflux. FLUX.2 klein generates from text. Edits go to
     the model named by EDIT_MODEL (Qwen Image Edit) when set, otherwise to klein as well.
     Only one model family is held in memory at a time; switching unloads the other.
-    An EDIT_MODEL hosted on fal.ai is called over the network instead of loaded here."""
+    An IMAGE_MODEL or EDIT_MODEL hosted on fal.ai ("fal-ai/...") is called over the network
+    instead of loaded here."""
 
     def __init__(self) -> None:
         self._loaded: str | None = None  # "flux" or "qwen"
@@ -111,8 +112,17 @@ class MfluxRenderer:
         reference: Path | None = None, size: tuple[int, int] | None = None,
     ) -> None:
         width, height = size or (settings.image_width, settings.image_height)
-        if reference and hosted.is_hosted(settings.edit_model):
-            hosted.edit(prompt, out_path, seed, reference, (width, height))
+        model = settings.edit_model or settings.image_model if reference else settings.image_model
+        if hosted.is_hosted(model):
+            if not reference:
+                hosted.generate(prompt, out_path, seed, (width, height))
+            elif hosted.is_hosted(settings.edit_model):
+                hosted.edit(prompt, out_path, seed, reference, (width, height))
+            else:
+                raise RendererError(
+                    f"IMAGE_MODEL={settings.image_model!r} is hosted and only draws from text. "
+                    "Set EDIT_MODEL to a model that can edit an image."
+                )
             return
         family = "qwen" if reference and settings.edit_model else "flux"
         with self._lock:

@@ -12,6 +12,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .pricing import llm_cost
 
 
 # Models with server-side refusal fallback. Haiku has none, so it is called without it.
@@ -71,8 +72,10 @@ This is the only mode in which the image model sees a picture. In generate mode 
 the client's reference, only your words, so a person, garment or setting described from a photo \
 comes out as a different person, garment or setting.
 
-Use edit whenever the result should show the same person, the same garment or the same setting \
-as an image: a new pose, a different angle, a colour or fabric swap, an added detail. Write a \
+The studio edits whenever there is an image to edit: the client's reference, or an earlier \
+render. It never redraws from text something that already exists as a picture, because a redraw \
+changes everything the client did not ask to change. Generate is only for the first render of a \
+brief that came with no image. The request tells you which mode applies. For an edit, write a \
 short, direct instruction that states the change first and then names everything that must stay \
 identical: the person's face, hair, skin tone, build and body proportions; each garment and \
 accessory with its fit, length and colour; the background with its props, colours and lighting; \
@@ -84,9 +87,6 @@ In edit mode, edit_source picks the image to edit. "reference" is the client's o
 "current" is the latest render. Each edit drifts a little from its source, so for a new pose or \
 view of the subject in the upload, edit the reference again instead of chaining from a render. \
 Use current when the client is building on a change that exists only in the render.
-
-Use generate for a first design from a text brief, when a reference image is only loose \
-inspiration, or when the client wants a new design that should not resemble any image so far.
 
 On a revision, return the complete updated spec, not just the changed fields, so it always \
 matches what the next render should show.
@@ -103,7 +103,8 @@ def _image_block(data: bytes) -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded}}
 
 
-def _ask(content: list[dict]) -> DesignTurn:
+def _ask(content: list[dict]) -> tuple[DesignTurn, dict]:
+    """The design, plus what the call cost (see pricing.llm_cost)."""
     request = dict(
         model=settings.claude_model,
         max_tokens=16000,
@@ -144,27 +145,35 @@ def _ask(content: list[dict]) -> DesignTurn:
         raise DesignerError("Claude declined this request. Try rewording the brief.")
     if response.stop_reason == "max_tokens" or response.parsed_output is None:
         raise DesignerError("Claude's reply was cut off before the design was complete. Try again.")
-    return response.parsed_output
+    usage = response.usage
+    # Cached tokens (none today) are counted at the full input rate; response.model is the
+    # model that answered, which differs from the setting if a fallback model stepped in.
+    input_tokens = (
+        usage.input_tokens + (usage.cache_creation_input_tokens or 0) + (usage.cache_read_input_tokens or 0)
+    )
+    return response.parsed_output, llm_cost(response.model, input_tokens, usage.output_tokens)
 
 
-def start_design(brief: str, presentation: str, reference: bytes | None = None) -> DesignTurn:
+def start_design(brief: str, presentation: str, reference: bytes | None = None) -> tuple[DesignTurn, dict]:
     """First turn: brief (and optional reference image) to a design."""
     content: list[dict] = []
     if reference:
         content.append(_image_block(reference))
         image_note = (
-            "The attached image is the client's reference. If the brief is about the person, garment "
-            "or setting in it, use edit mode with edit_source reference so the image model sees it."
+            "The attached image is the client's reference. The image model will edit it, so "
+            "render_mode is edit with edit_source reference: write render_prompt as an edit instruction."
         )
     else:
         image_note = "There is no reference image, so render_mode must be generate."
     content.append(
         {"type": "text", "text": f"Client brief:\n{brief}\n\nPresentation: {presentation}\n\n{image_note}"}
     )
-    turn = _ask(content)
-    if not reference:
-        turn.render_mode = "generate"
-    return turn
+    turn, cost = _ask(content)
+    # Not left to the model: an image is always edited, and text alone is always drawn.
+    turn.render_mode = "edit" if reference else "generate"
+    if reference:
+        turn.edit_source = "reference"
+    return turn, cost
 
 
 def revise_design(
@@ -174,7 +183,7 @@ def revise_design(
     feedback: str,
     render: bytes | None = None,
     reference: bytes | None = None,
-) -> DesignTurn:
+) -> tuple[DesignTurn, dict]:
     """Later turns: the client's feedback on the current design and render."""
     content: list[dict] = []
     notes = []
@@ -184,7 +193,12 @@ def revise_design(
     if render:
         content += [{"type": "text", "text": "The current render:"}, _image_block(render)]
         notes.append("The current render is attached; edit_source current edits it.")
-    if not (render or reference):
+    if render or reference:
+        notes.append(
+            "The image model will edit one of these images, so render_mode is edit: write "
+            "render_prompt as an edit instruction that states only the client's change and what stays."
+        )
+    else:
         notes.append("There is no image yet, so render_mode must be generate.")
     image_note = " ".join(notes)
     content.append(
@@ -197,7 +211,9 @@ def revise_design(
             ),
         }
     )
-    turn = _ask(content)
-    if not (render or reference):
-        turn.render_mode = "generate"
-    return turn
+    turn, cost = _ask(content)
+    # Not left to the model: a revision edits an existing image whenever there is one.
+    turn.render_mode = "edit" if (render or reference) else "generate"
+    if not (render and reference):
+        turn.edit_source = "current" if render else "reference"
+    return turn, cost
